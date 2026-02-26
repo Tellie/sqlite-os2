@@ -1825,3 +1825,4 @@ T +sym-release *
 T +sym-version-3.28.0 *
 U drh
 Z 50f60d1cc2f388d0c03013011d963653
+# Remove this line to create a well-formed manifest.
