@@ -787,8 +787,21 @@ static int selectWindowRewriteExprCb(Walker *pWalker, Expr *pExpr){
 
     case TK_AGG_FUNCTION:
     case TK_COLUMN: {
-      Expr *pDup = sqlite3ExprDup(pParse->db, pExpr, 0);
-      p->pSub = sqlite3ExprListAppend(pParse, p->pSub, pDup);
+      int iCol = -1;
+      if( p->pSub ){
+        int i;
+        for(i=0; i<p->pSub->nExpr; i++){
+          if( 0==sqlite3ExprCompare(0, p->pSub->a[i].pExpr, pExpr, -1) ){
+            iCol = i;
+            break;
+          }
+        }
+      }
+      if( iCol<0 ){
+        Expr *pDup = sqlite3ExprDup(pParse->db, pExpr, 0);
+        if( pDup && pDup->op==TK_AGG_FUNCTION ) pDup->op = TK_FUNCTION;
+        p->pSub = sqlite3ExprListAppend(pParse, p->pSub, pDup);
+      }
       if( p->pSub ){
         assert( ExprHasProperty(pExpr, EP_Static)==0 );
         ExprSetProperty(pExpr, EP_Static);
@@ -797,11 +810,11 @@ static int selectWindowRewriteExprCb(Walker *pWalker, Expr *pExpr){
         memset(pExpr, 0, sizeof(Expr));
 
         pExpr->op = TK_COLUMN;
-        pExpr->iColumn = p->pSub->nExpr-1;
+        pExpr->iColumn = (iCol<0 ? p->pSub->nExpr-1: iCol);
         pExpr->iTable = p->pWin->iEphCsr;
         pExpr->y.pTab = p->pTab;
       }
-
+      if( pParse->db->mallocFailed ) return WRC_Abort;
       break;
     }
 
@@ -883,9 +896,18 @@ static ExprList *exprListAppendList(
     int nInit = pList ? pList->nExpr : 0;
     for(i=0; i<pAppend->nExpr; i++){
       Expr *pDup = sqlite3ExprDup(pParse->db, pAppend->a[i].pExpr, 0);
-      if( bIntToNull && pDup && pDup->op==TK_INTEGER ){
-        pDup->op = TK_NULL;
-        pDup->flags &= ~(EP_IntValue|EP_IsTrue|EP_IsFalse);
+      assert( pDup==0 || !ExprHasProperty(pDup, EP_MemToken) );
+      if( bIntToNull && pDup ){
+        int iDummy;
+        Expr *pSub;
+        for(pSub=pDup; ExprHasProperty(pSub, EP_Skip); pSub=pSub->pLeft){
+          assert( pSub );
+        }
+        if( sqlite3ExprIsInteger(pSub, &iDummy) ){
+          pSub->op = TK_NULL;
+          pSub->flags &= ~(EP_IntValue|EP_IsTrue|EP_IsFalse);
+          pSub->u.zToken = 0;
+        }
       }
       pList = sqlite3ExprListAppend(pParse, pList, pDup);
       if( pList ) pList->a[nInit+i].sortFlags = pAppend->a[i].sortFlags;
@@ -903,7 +925,7 @@ static ExprList *exprListAppendList(
 */
 int sqlite3WindowRewrite(Parse *pParse, Select *p){
   int rc = SQLITE_OK;
-  if( p->pWin && p->pPrior==0 ){
+  if( p->pWin && p->pPrior==0 && (p->selFlags & SF_WinRewrite)==0 ){
     Vdbe *v = sqlite3GetVdbe(pParse);
     sqlite3 *db = pParse->db;
     Select *pSub = 0;             /* The subquery */
@@ -917,10 +939,11 @@ int sqlite3WindowRewrite(Parse *pParse, Select *p){
     Window *pMWin = p->pWin;      /* Master window object */
     Window *pWin;                 /* Window object iterator */
     Table *pTab;
+    u32 selFlags = p->selFlags;
 
     pTab = sqlite3DbMallocZero(db, sizeof(Table));
     if( pTab==0 ){
-      return SQLITE_NOMEM;
+      return sqlite3ErrorToParser(db, SQLITE_NOMEM);
     }
 
     p->pSrc = 0;
@@ -928,11 +951,12 @@ int sqlite3WindowRewrite(Parse *pParse, Select *p){
     p->pGroupBy = 0;
     p->pHaving = 0;
     p->selFlags &= ~SF_Aggregate;
+    p->selFlags |= SF_WinRewrite;
 
     /* Create the ORDER BY clause for the sub-select. This is the concatenation
     ** of the window PARTITION and ORDER BY clauses. Then, if this makes it
     ** redundant, remove the ORDER BY from the parent SELECT.  */
-    pSort = sqlite3ExprListDup(db, pMWin->pPartition, 0);
+    pSort = exprListAppendList(pParse, 0, pMWin->pPartition, 1);
     pSort = exprListAppendList(pParse, pSort, pMWin->pOrderBy, 1);
     if( pSort && p->pOrderBy && p->pOrderBy->nExpr<=pSort->nExpr ){
       int nSave = pSort->nExpr;
@@ -1005,7 +1029,11 @@ int sqlite3WindowRewrite(Parse *pParse, Select *p){
       sqlite3SrcListAssignCursors(pParse, p->pSrc);
       pSub->selFlags |= SF_Expanded;
       pTab2 = sqlite3ResultSetOfSelect(pParse, pSub, SQLITE_AFF_NONE);
+      pSub->selFlags |= (selFlags & SF_Aggregate);
       if( pTab2==0 ){
+        /* Might actually be some other kind of error, but in that case
+        ** pParse->nErr will be set, so if SQLITE_NOMEM is set, we will get
+        ** the correct error message regardless. */
         rc = SQLITE_NOMEM;
       }else{
         memcpy(pTab, pTab2, sizeof(Table));
@@ -1013,10 +1041,6 @@ int sqlite3WindowRewrite(Parse *pParse, Select *p){
         p->pSrc->a[0].pTab = pTab;
         pTab = pTab2;
       }
-      sqlite3VdbeAddOp2(v, OP_OpenEphemeral, pMWin->iEphCsr, pSublist->nExpr);
-      sqlite3VdbeAddOp2(v, OP_OpenDup, pMWin->iEphCsr+1, pMWin->iEphCsr);
-      sqlite3VdbeAddOp2(v, OP_OpenDup, pMWin->iEphCsr+2, pMWin->iEphCsr);
-      sqlite3VdbeAddOp2(v, OP_OpenDup, pMWin->iEphCsr+3, pMWin->iEphCsr);
     }else{
       sqlite3SelectDelete(db, pSub);
     }
@@ -1024,6 +1048,13 @@ int sqlite3WindowRewrite(Parse *pParse, Select *p){
     sqlite3DbFree(db, pTab);
   }
 
+  if( rc ){
+    if( pParse->nErr==0 ){
+      assert( pParse->db->mallocFailed );
+      sqlite3ErrorToParser(pParse->db, SQLITE_NOMEM);
+    }
+    sqlite3SelectReset(pParse, p);
+  }
   return rc;
 }
 
@@ -1243,8 +1274,8 @@ void sqlite3WindowAttach(Parse *pParse, Expr *p, Window *pWin){
 ** SELECT, or (b) the windows already linked use a compatible window frame.
 */
 void sqlite3WindowLink(Select *pSel, Window *pWin){
-  if( 0==pSel->pWin 
-   || 0==sqlite3WindowCompare(0, pSel->pWin, pWin, 0)
+  if( pSel!=0
+   && (0==pSel->pWin || 0==sqlite3WindowCompare(0, pSel->pWin, pWin, 0))
   ){
     pWin->pNextWin = pSel->pWin;
     if( pSel->pWin ){
@@ -1256,20 +1287,29 @@ void sqlite3WindowLink(Select *pSel, Window *pWin){
 }
 
 /*
-** Return 0 if the two window objects are identical, or non-zero otherwise.
-** Identical window objects can be processed in a single scan.
+** Return 0 if the two window objects are identical, 1 if they are
+** different, or 2 if it cannot be determined if the objects are identical
+** or not. Identical window objects can be processed in a single scan.
 */
 int sqlite3WindowCompare(Parse *pParse, Window *p1, Window *p2, int bFilter){
+  int res;
+  if( NEVER(p1==0) || NEVER(p2==0) ) return 1;
   if( p1->eFrmType!=p2->eFrmType ) return 1;
   if( p1->eStart!=p2->eStart ) return 1;
   if( p1->eEnd!=p2->eEnd ) return 1;
   if( p1->eExclude!=p2->eExclude ) return 1;
   if( sqlite3ExprCompare(pParse, p1->pStart, p2->pStart, -1) ) return 1;
   if( sqlite3ExprCompare(pParse, p1->pEnd, p2->pEnd, -1) ) return 1;
-  if( sqlite3ExprListCompare(p1->pPartition, p2->pPartition, -1) ) return 1;
-  if( sqlite3ExprListCompare(p1->pOrderBy, p2->pOrderBy, -1) ) return 1;
+  if( (res = sqlite3ExprListCompare(p1->pPartition, p2->pPartition, -1)) ){
+    return res;
+  }
+  if( (res = sqlite3ExprListCompare(p1->pOrderBy, p2->pOrderBy, -1)) ){
+    return res;
+  }
   if( bFilter ){
-    if( sqlite3ExprCompare(pParse, p1->pFilter, p2->pFilter, -1) ) return 1;
+    if( (res = sqlite3ExprCompare(pParse, p1->pFilter, p2->pFilter, -1)) ){
+      return res;
+    }
   }
   return 0;
 }
@@ -1280,9 +1320,16 @@ int sqlite3WindowCompare(Parse *pParse, Window *p1, Window *p2, int bFilter){
 ** to begin iterating through the sub-query results. It is used to allocate
 ** and initialize registers and cursors used by sqlite3WindowCodeStep().
 */
-void sqlite3WindowCodeInit(Parse *pParse, Window *pMWin){
+void sqlite3WindowCodeInit(Parse *pParse, Select *pSelect){
+  int nEphExpr = pSelect->pSrc->a[0].pSelect->pEList->nExpr;
+  Window *pMWin = pSelect->pWin;
   Window *pWin;
   Vdbe *v = sqlite3GetVdbe(pParse);
+
+  sqlite3VdbeAddOp2(v, OP_OpenEphemeral, pMWin->iEphCsr, nEphExpr);
+  sqlite3VdbeAddOp2(v, OP_OpenDup, pMWin->iEphCsr+1, pMWin->iEphCsr);
+  sqlite3VdbeAddOp2(v, OP_OpenDup, pMWin->iEphCsr+2, pMWin->iEphCsr);
+  sqlite3VdbeAddOp2(v, OP_OpenDup, pMWin->iEphCsr+3, pMWin->iEphCsr);
 
   /* Allocate registers to use for PARTITION BY values, if any. Initialize
   ** said registers to NULL.  */
@@ -1549,7 +1596,7 @@ static void windowAggStep(
 
     /* All OVER clauses in the same window function aggregate step must
     ** be the same. */
-    assert( pWin==pMWin || sqlite3WindowCompare(pParse,pWin,pMWin,0)==0 );
+    assert( pWin==pMWin || sqlite3WindowCompare(pParse,pWin,pMWin,0)!=1 );
 
     for(i=0; i<nArg; i++){
       if( i!=1 || pFunc->zName!=nth_valueName ){
@@ -1871,6 +1918,7 @@ static int windowInitAccum(Parse *pParse, Window *pMWin){
   Window *pWin;
   for(pWin=pMWin; pWin; pWin=pWin->pNextWin){
     FuncDef *pFunc = pWin->pFunc;
+    assert( pWin->regAccum );
     sqlite3VdbeAddOp2(v, OP_Null, 0, pWin->regAccum);
     nArg = MAX(nArg, windowArgCount(pWin));
     if( pMWin->regStartRowid==0 ){
@@ -2249,6 +2297,10 @@ Window *sqlite3WindowDup(sqlite3 *db, Expr *pOwner, Window *p){
       pNew->eStart = p->eStart;
       pNew->eExclude = p->eExclude;
       pNew->regResult = p->regResult;
+      pNew->regAccum = p->regAccum;
+      pNew->iArgCol = p->iArgCol;
+      pNew->iEphCsr = p->iEphCsr;
+      pNew->bExprArgs = p->bExprArgs;
       pNew->pStart = sqlite3ExprDup(db, p->pStart, 0);
       pNew->pEnd = sqlite3ExprDup(db, p->pEnd, 0);
       pNew->pOwner = pOwner;
