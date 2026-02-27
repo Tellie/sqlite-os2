@@ -106,8 +106,9 @@ struct FrameBound     { int eType; Expr *pExpr; };
 ** shared across database connections.
 */
 static void disableLookaside(Parse *pParse){
+  sqlite3 *db = pParse->db;
   pParse->disableLookaside++;
-  pParse->db->lookaside.bDisable++;
+  DisableLookaside;
 }
 
 } // end %include
@@ -119,7 +120,7 @@ cmdlist ::= ecmd.
 ecmd ::= SEMI.
 ecmd ::= cmdx SEMI.
 %ifndef SQLITE_OMIT_EXPLAIN
-ecmd ::= explain cmdx.
+ecmd ::= explain cmdx SEMI.       {NEVER-REDUCE}
 explain ::= EXPLAIN.              { pParse->explain = 1; }
 explain ::= EXPLAIN QUERY PLAN.   { pParse->explain = 2; }
 %endif  SQLITE_OMIT_EXPLAIN
@@ -219,6 +220,9 @@ columnname(A) ::= nm(A) typetoken(Y). {sqlite3AddColumn(pParse,&A,&Y);}
   CURRENT FOLLOWING PARTITION PRECEDING RANGE UNBOUNDED
   EXCLUDE GROUPS OTHERS TIES
 %endif SQLITE_OMIT_WINDOWFUNC
+%ifndef SQLITE_OMIT_GENERATED_COLUMNS
+  GENERATED ALWAYS
+%endif
   REINDEX RENAME CTIME_KW IF
   .
 %wildcard ANY.
@@ -346,6 +350,10 @@ ccons ::= REFERENCES nm(T) eidlist_opt(TA) refargs(R).
                                  {sqlite3CreateForeignKey(pParse,0,&T,TA,R);}
 ccons ::= defer_subclause(D).    {sqlite3DeferForeignKey(pParse,D);}
 ccons ::= COLLATE ids(C).        {sqlite3AddCollateType(pParse, &C);}
+ccons ::= GENERATED ALWAYS AS generated.
+ccons ::= AS generated.
+generated ::= LP expr(E) RP.          {sqlite3AddGenerated(pParse,E,0);}
+generated ::= LP expr(E) RP ID(TYPE). {sqlite3AddGenerated(pParse,E,&TYPE);}
 
 // The optional AUTOINCREMENT keyword
 %type autoinc {int}
@@ -957,6 +965,7 @@ idlist(A) ::= nm(Y).
       p->op = (u8)op;
       p->affExpr = 0;
       p->flags = EP_Leaf;
+      ExprClearVVAProperties(p);
       p->iAgg = -1;
       p->pLeft = p->pRight = 0;
       p->x.pList = 0;
@@ -1070,6 +1079,9 @@ expr(A) ::= LP nexprlist(X) COMMA expr(Y) RP. {
   A = sqlite3PExpr(pParse, TK_VECTOR, 0, 0);
   if( A ){
     A->x.pList = pList;
+    if( ALWAYS(pList->nExpr) ){
+      A->flags |= pList->a[0].pExpr->flags & EP_Propagate;
+    }
   }else{
     sqlite3ExprListDelete(pParse->db, pList);
   }
@@ -1182,6 +1194,13 @@ expr(A) ::= expr(A) between_op(N) expr(X) AND expr(Y). [BETWEEN] {
       */
       sqlite3ExprUnmapAndDelete(pParse, A);
       A = sqlite3Expr(pParse->db, TK_INTEGER, N ? "1" : "0");
+    }else if( Y->nExpr==1 && sqlite3ExprIsConstant(Y->a[0].pExpr) ){
+      Expr *pRHS = Y->a[0].pExpr;
+      Y->a[0].pExpr = 0;
+      sqlite3ExprListDelete(pParse->db, Y);
+      pRHS = sqlite3PExpr(pParse, TK_UPLUS, pRHS, 0);
+      A = sqlite3PExpr(pParse, TK_EQ, A, pRHS);
+      if( N ) A = sqlite3PExpr(pParse, TK_NOT, A, 0);
     }else{
       A = sqlite3PExpr(pParse, TK_IN, A, 0);
       if( A ){

@@ -621,12 +621,12 @@ static const struct {
   double rLimit;      /* Maximum NNN value for this transform */
   double rXform;      /* Constant used for this transform */
 } aXformType[] = {
-  { 0, 6, "second", 464269060800.0, 86400000.0/(24.0*60.0*60.0) },
-  { 0, 6, "minute", 7737817680.0,   86400000.0/(24.0*60.0)      },
-  { 0, 4, "hour",   128963628.0,    86400000.0/24.0             },
-  { 0, 3, "day",    5373485.0,      86400000.0                  },
-  { 1, 5, "month",  176546.0,       30.0*86400000.0             },
-  { 2, 4, "year",   14713.0,        365.0*86400000.0            },
+  { 0, 6, "second", 464269060800.0, 1000.0         },
+  { 0, 6, "minute", 7737817680.0,   60000.0        },
+  { 0, 4, "hour",   128963628.0,    3600000.0      },
+  { 0, 3, "day",    5373485.0,      86400000.0     },
+  { 1, 5, "month",  176546.0,       2592000000.0   },
+  { 2, 4, "year",   14713.0,        31536000000.0  },
 };
 
 /*
@@ -688,7 +688,7 @@ static int parseModifier(
         r = p->s*1000.0 + 210866760000000.0;
         if( r>=0.0 && r<464269060800000.0 ){
           clearYMD_HMS_TZ(p);
-          p->iJD = (sqlite3_int64)r;
+          p->iJD = (sqlite3_int64)(r + 0.5);
           p->validJD = 1;
           p->rawS = 0;
           rc = 0;

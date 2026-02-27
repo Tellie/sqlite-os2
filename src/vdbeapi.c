@@ -663,7 +663,7 @@ static int sqlite3Step(Vdbe *p){
     ** from interrupting a statement that has not yet started.
     */
     if( db->nVdbeActive==0 ){
-      db->u1.isInterrupted = 0;
+      AtomicStore(&db->u1.isInterrupted, 0);
     }
 
     assert( db->nVdbeWrite>0 || db->autoCommit==0 
@@ -1355,7 +1355,7 @@ static int vdbeUnbind(Vdbe *p, int i){
   /* If the bit corresponding to this variable in Vdbe.expmask is set, then 
   ** binding a new value to this variable invalidates the current query plan.
   **
-  ** IMPLEMENTATION-OF: R-48440-37595 If the specific value bound to host
+  ** IMPLEMENTATION-OF: R-57496-20354 If the specific value bound to a host
   ** parameter in the WHERE clause might influence the choice of query plan
   ** for a statement, then the statement will be automatically recompiled,
   ** as if there had been a schema change, on the first sqlite3_step() call
@@ -1831,7 +1831,7 @@ int sqlite3_preupdate_old(sqlite3 *db, int iIdx, sqlite3_value **ppValue){
     goto preupdate_old_out;
   }
   if( p->pPk ){
-    iIdx = sqlite3ColumnOfIndex(p->pPk, iIdx);
+    iIdx = sqlite3TableColumnToIndex(p->pPk, iIdx);
   }
   if( iIdx>=p->pCsr->nField || iIdx<0 ){
     rc = SQLITE_RANGE;
@@ -1921,7 +1921,7 @@ int sqlite3_preupdate_new(sqlite3 *db, int iIdx, sqlite3_value **ppValue){
     goto preupdate_new_out;
   }
   if( p->pPk && p->op!=SQLITE_UPDATE ){
-    iIdx = sqlite3ColumnOfIndex(p->pPk, iIdx);
+    iIdx = sqlite3TableColumnToIndex(p->pPk, iIdx);
   }
   if( iIdx>=p->pCsr->nField || iIdx<0 ){
     rc = SQLITE_RANGE;

@@ -417,9 +417,7 @@ struct BtShared {
 #endif
   u8 inTransaction;     /* Transaction state */
   u8 max1bytePayload;   /* Maximum first byte of cell for a 1-byte payload */
-#ifdef SQLITE_HAS_CODEC
-  u8 optimalReserve;    /* Desired amount of reserved space per page */
-#endif
+  u8 nReserveWanted;    /* Desired number of extra bytes per page */
   u16 btsFlags;         /* Boolean parameters.  See BTS_* macros below */
   u16 maxLocal;         /* Maximum local payload in non-LEAFDATA tables */
   u16 minLocal;         /* Minimum local payload in non-LEAFDATA tables */
@@ -542,6 +540,7 @@ struct BtCursor {
 #define BTCF_AtLast       0x08   /* Cursor is pointing ot the last entry */
 #define BTCF_Incrblob     0x10   /* True if an incremental I/O handle */
 #define BTCF_Multiple     0x20   /* Maybe another cursor on the same btree */
+#define BTCF_Pinned       0x40   /* Cursor is busy and cannot be moved */
 
 /*
 ** Potential values for BtCursor.eState.
@@ -685,6 +684,7 @@ struct IntegrityCk {
   int v1, v2;       /* Values for up to two %d fields in zPfx */
   StrAccum errMsg;  /* Accumulate the error message text here */
   u32 *heap;        /* Min-heap used for analyzing cell coverage */
+  sqlite3 *db;      /* Database connection running the check */
 };
 
 /*
