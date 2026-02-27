@@ -85,6 +85,7 @@
 #include <ctype.h>
 #include <assert.h>
 #include "sqlite3.h"
+#include "sqlite3recover.h"
 #define ISSPACE(X) isspace((unsigned char)(X))
 #define ISDIGIT(X) isdigit((unsigned char)(X))
 
@@ -153,16 +154,15 @@ static struct GlobalVars {
   int nSql;                        /* Number of SQL scripts */
   Blob *pFirstSql;                 /* First SQL script */
   unsigned int uRandom;            /* Seed for the SQLite PRNG */
+  unsigned int nInvariant;         /* Number of invariant checks run */
   char zTestName[100];             /* Name of current test */
 } g;
 
 /*
-** Include the external vt02.c module, if requested by compile-time
-** options.
+** Include the external vt02.c module.
 */
-#ifdef VT02_SOURCES
-# include "vt02.c"
-#endif
+extern int sqlite3_vt02_init(sqlite3*,char***,void*);
+
 
 /*
 ** Print an error message and quit.
@@ -628,6 +628,9 @@ static unsigned int oomCounter = 0;    /* Simulate OOM when equals 1 */
 static unsigned int oomRepeat = 0;     /* Number of OOMs in a row */
 static void*(*defaultMalloc)(int) = 0; /* The low-level malloc routine */
 
+/* Enable recovery */
+static int bNoRecover = 0;
+
 /* This routine is called when a simulated OOM occurs.  It is broken
 ** out as a separate routine to make it easy to set a breakpoint on
 ** the OOM
@@ -831,6 +834,14 @@ static int progress_handler(void *pClientData) {
 }
 
 /*
+** Flag bits set by block_troublesome_sql()
+*/
+#define BTS_SELECT      0x000001
+#define BTS_NONSELECT   0x000002
+#define BTS_BADFUNC     0x000004
+#define BTS_BADPRAGMA   0x000008  /* Sticky for rest of the script */
+
+/*
 ** Disallow debugging pragmas such as "PRAGMA vdbe_debug" and
 ** "PRAGMA parser_trace" since they can dramatically increase the
 ** amount of output without actually testing anything useful.
@@ -838,64 +849,202 @@ static int progress_handler(void *pClientData) {
 ** Also block ATTACH if attaching a file from the filesystem.
 */
 static int block_troublesome_sql(
-  void *Notused,
+  void *pClientData,
   int eCode,
   const char *zArg1,
   const char *zArg2,
   const char *zArg3,
   const char *zArg4
 ){
-  (void)Notused;
-  (void)zArg2;
+  unsigned int *pBtsFlags = (unsigned int*)pClientData;
+
   (void)zArg3;
   (void)zArg4;
-  if( eCode==SQLITE_PRAGMA ){
-    if( sqlite3_stricmp("busy_timeout",zArg1)==0
-     && (zArg2==0 || strtoll(zArg2,0,0)>100 || strtoll(zArg2,0,10)>100)
-    ){
-      return SQLITE_DENY;
-    }else if( eVerbosity==0 ){
-      if( sqlite3_strnicmp("vdbe_", zArg1, 5)==0
-       || sqlite3_stricmp("parser_trace", zArg1)==0
-       || sqlite3_stricmp("temp_store_directory", zArg1)==0
+  switch( eCode ){
+    case SQLITE_PRAGMA: {
+      if( sqlite3_stricmp("busy_timeout",zArg1)==0
+       && (zArg2==0 || strtoll(zArg2,0,0)>100 || strtoll(zArg2,0,10)>100)
       ){
         return SQLITE_DENY;
+      }else if( sqlite3_stricmp("hard_heap_limit", zArg1)==0
+              || sqlite3_stricmp("reverse_unordered_selects", zArg1)==0
+      ){
+        /* BTS_BADPRAGMA is sticky.  A hard_heap_limit or
+        ** revert_unordered_selects should inhibit all future attempts
+        ** at verifying query invariants */
+        *pBtsFlags |= BTS_BADPRAGMA;
+      }else if( eVerbosity==0 ){
+        if( sqlite3_strnicmp("vdbe_", zArg1, 5)==0
+         || sqlite3_stricmp("parser_trace", zArg1)==0
+         || sqlite3_stricmp("temp_store_directory", zArg1)==0
+        ){
+         return SQLITE_DENY;
+        }
+      }else if( sqlite3_stricmp("oom",zArg1)==0
+              && zArg2!=0 && zArg2[0]!=0 ){
+        oomCounter = atoi(zArg2);
       }
-    }else if( sqlite3_stricmp("oom",zArg1)==0
-             && zArg2!=0 && zArg2[0]!=0 ){
-      oomCounter = atoi(zArg2);
+      *pBtsFlags |= BTS_NONSELECT;
+      break;
     }
-  }else if( eCode==SQLITE_ATTACH ){
-    /* Deny the ATTACH if it is attaching anything other than an in-memory
-    ** database. */
-    if( zArg1==0 ) return SQLITE_DENY;
-    if( strcmp(zArg1,":memory:")==0 ) return SQLITE_OK;
-    if( sqlite3_strglob("file:*[?]vfs=memdb", zArg1)==0
-     && sqlite3_strglob("file:*[^/a-zA-Z0-9_.]*[?]vfs=memdb", zArg1)!=0
-    ){
-      return SQLITE_OK;
+    case SQLITE_ATTACH: {
+      /* Deny the ATTACH if it is attaching anything other than an in-memory
+      ** database. */
+      *pBtsFlags |= BTS_NONSELECT;
+      if( zArg1==0 ) return SQLITE_DENY;
+      if( strcmp(zArg1,":memory:")==0 ) return SQLITE_OK;
+      if( sqlite3_strglob("file:*[?]vfs=memdb", zArg1)==0
+       && sqlite3_strglob("file:*[^/a-zA-Z0-9_.]*[?]vfs=memdb", zArg1)!=0
+      ){
+        return SQLITE_OK;
+      }
+      return SQLITE_DENY;
     }
-    return SQLITE_DENY;
+    case SQLITE_SELECT: {
+      *pBtsFlags |= BTS_SELECT;
+      break;
+    }
+    case SQLITE_FUNCTION: {
+      static const char *azBadFuncs[] = {
+        "avg",
+        "count",
+        "cume_dist",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "date",
+        "datetime",
+        "decimal_sum",
+        "dense_rank",
+        "first_value",
+        "geopoly_group_bbox",
+        "group_concat",
+        "implies_nonnull_row",
+        "json_group_array",
+        "json_group_object",
+        "julianday",
+        "lag",
+        "last_value",
+        "lead",
+        "max",
+        "min",
+        "nth_value",
+        "ntile",
+        "percent_rank",
+        "random",
+        "randomblob",
+        "rank",
+        "row_number",
+        "sqlite_offset",
+        "strftime",
+        "sum",
+        "time",
+        "total",
+        "unixepoch",
+      };
+      int first, last;
+      first = 0;
+      last = sizeof(azBadFuncs)/sizeof(azBadFuncs[0]) - 1;
+      do{
+        int mid = (first+last)/2;
+        int c = sqlite3_stricmp(azBadFuncs[mid], zArg2);
+        if( c<0 ){
+          first = mid+1;
+        }else if( c>0 ){
+          last = mid-1;
+        }else{
+          *pBtsFlags |= BTS_BADFUNC;
+          break;
+        }
+      }while( first<=last );
+      break;
+    }
+    case SQLITE_READ: {
+      /* Benign */
+      break;
+    }
+    default: {
+      *pBtsFlags |= BTS_NONSELECT;
+    }
+  }
+  return SQLITE_OK;
+}
+
+/* Implementation found in fuzzinvariant.c */
+extern int fuzz_invariant(
+  sqlite3 *db,            /* The database connection */
+  sqlite3_stmt *pStmt,    /* Test statement stopped on an SQLITE_ROW */
+  int iCnt,               /* Invariant sequence number, starting at 0 */
+  int iRow,               /* The row number for pStmt */
+  int nRow,               /* Total number of output rows */
+  int *pbCorrupt,         /* IN/OUT: Flag indicating a corrupt database file */
+  int eVerbosity          /* How much debugging output */
+);
+
+/* Implementation of sqlite_dbdata and sqlite_dbptr */
+extern int sqlite3_dbdata_init(sqlite3*,const char**,void*);
+
+
+/*
+** This function is used as a callback by the recover extension. Simply
+** print the supplied SQL statement to stdout.
+*/
+static int recoverSqlCb(void *pCtx, const char *zSql){
+  if( eVerbosity>=2 ){
+    printf("%s\n", zSql);
   }
   return SQLITE_OK;
 }
 
 /*
+** This function is called to recover data from the database.
+*/
+static int recoverDatabase(sqlite3 *db){
+  int rc;                                 /* Return code from this routine */
+  const char *zLAF = "lost_and_found";    /* Name of "lost_and_found" table */
+  int bFreelist = 1;                      /* True to scan the freelist */
+  int bRowids = 1;                        /* True to restore ROWID values */
+  sqlite3_recover *p;                     /* The recovery object */
+
+  p = sqlite3_recover_init_sql(db, "main", recoverSqlCb, 0);
+  sqlite3_recover_config(p, SQLITE_RECOVER_LOST_AND_FOUND, (void*)zLAF);
+  sqlite3_recover_config(p, SQLITE_RECOVER_ROWIDS, (void*)&bRowids);
+  sqlite3_recover_config(p, SQLITE_RECOVER_FREELIST_CORRUPT,(void*)&bFreelist);
+  sqlite3_recover_run(p);
+  if( sqlite3_recover_errcode(p)!=SQLITE_OK ){
+    const char *zErr = sqlite3_recover_errmsg(p);
+    int errCode = sqlite3_recover_errcode(p);
+    if( eVerbosity>0 ){
+      printf("recovery error: %s (%d)\n", zErr, errCode);
+    }
+  }
+  rc = sqlite3_recover_finish(p);
+  if( eVerbosity>0 && rc ){
+     printf("recovery returns error code %d\n", rc);
+  }
+  return rc;
+}
+
+/*
 ** Run the SQL text
 */
-static int runDbSql(sqlite3 *db, const char *zSql){
+static int runDbSql(sqlite3 *db, const char *zSql, unsigned int *pBtsFlags){
   int rc;
   sqlite3_stmt *pStmt;
+  int bCorrupt = 0;
   while( isspace(zSql[0]&0x7f) ) zSql++;
   if( zSql[0]==0 ) return SQLITE_OK;
   if( eVerbosity>=4 ){
     printf("RUNNING-SQL: [%s]\n", zSql);
     fflush(stdout);
   }
+  (*pBtsFlags) &= ~BTS_BADPRAGMA;
   rc = sqlite3_prepare_v2(db, zSql, -1, &pStmt, 0);
   if( rc==SQLITE_OK ){
+    int nRow = 0;
     while( (rc = sqlite3_step(pStmt))==SQLITE_ROW ){
-      if( eVerbosity>=5 ){
+      nRow++;
+      if( eVerbosity>=4 ){
         int j;
         for(j=0; j<sqlite3_column_count(pStmt); j++){
           if( j ) printf(",");
@@ -943,7 +1092,32 @@ static int runDbSql(sqlite3 *db, const char *zSql){
         fflush(stdout);
       } /* End if( eVerbosity>=5 ) */
     } /* End while( SQLITE_ROW */
-    if( rc!=SQLITE_DONE && eVerbosity>=4 ){
+    if( rc==SQLITE_DONE ){
+      if( (*pBtsFlags)==BTS_SELECT
+       && !sqlite3_stmt_isexplain(pStmt)
+       && nRow>0
+      ){
+        int iRow = 0;
+        sqlite3_reset(pStmt);
+        while( sqlite3_step(pStmt)==SQLITE_ROW ){
+          int iCnt = 0;
+          iRow++;
+          for(iCnt=0; iCnt<99999; iCnt++){
+            rc = fuzz_invariant(db, pStmt, iCnt, iRow, nRow,
+                                &bCorrupt, eVerbosity);
+            if( rc==SQLITE_DONE ) break;
+            if( rc!=SQLITE_ERROR ) g.nInvariant++;
+            if( eVerbosity>0 ){
+              if( rc==SQLITE_OK ){
+                printf("invariant-check: ok\n");
+              }else if( rc==SQLITE_CORRUPT ){
+                printf("invariant-check: failed due to database corruption\n");
+              }
+            }
+          }
+        }          
+      }
+    }else if( eVerbosity>=4 ){
       printf("SQL-ERROR: (%d) %s\n", rc, sqlite3_errmsg(db));
       fflush(stdout);
     }
@@ -971,6 +1145,7 @@ int runCombinedDbSqlInput(
   char *zSql = 0;            /* SQL text to run */
   int nSql;                  /* Bytes of SQL text */
   FuzzCtx cx;                /* Fuzzing context */
+  unsigned int btsFlags = 0; /* Parsing flags */
 
   if( nByte<10 ) return 0;
   if( sqlite3_initialize() ) return 0;
@@ -1058,11 +1233,14 @@ int runCombinedDbSqlInput(
 
   /* Block debug pragmas and ATTACH/DETACH.  But wait until after
   ** deserialize to do this because deserialize depends on ATTACH */
-  sqlite3_set_authorizer(cx.db, block_troublesome_sql, 0);
+  sqlite3_set_authorizer(cx.db, block_troublesome_sql, &btsFlags);
 
-#ifdef VT02_SOURCES
+  /* Add the vt02 virtual table */
   sqlite3_vt02_init(cx.db, 0, 0);
-#endif
+
+  /* Add support for sqlite_dbdata and sqlite_dbptr virtual tables used
+  ** by the recovery API */
+  sqlite3_dbdata_init(cx.db, 0, 0);
 
   /* Consistent PRNG seed */
 #ifdef SQLITE_TESTCTRL_PRNG_SEED
@@ -1071,6 +1249,12 @@ int runCombinedDbSqlInput(
 #else
   sqlite3_randomness(0,0);
 #endif
+
+  /* Run recovery on the initial database, just to make sure recovery
+  ** works. */
+  if( !bNoRecover ){
+    recoverDatabase(cx.db);
+  }
 
   zSql = sqlite3_malloc( nSql + 1 );
   if( zSql==0 ){
@@ -1083,7 +1267,7 @@ int runCombinedDbSqlInput(
         char cSaved = zSql[i+1];
         zSql[i+1] = 0;
         if( sqlite3_complete(zSql+j) ){
-          rc = runDbSql(cx.db, zSql+j);
+          rc = runDbSql(cx.db, zSql+j, &btsFlags);
           j = i+1;
         }
         zSql[i+1] = cSaved;
@@ -1093,7 +1277,7 @@ int runCombinedDbSqlInput(
       }
     }
     if( j<i ){
-      runDbSql(cx.db, zSql+j);
+      runDbSql(cx.db, zSql+j, &btsFlags);
     }
   }
 testrun_finished:
@@ -1571,6 +1755,7 @@ static void showHelp(void){
 "  -m TEXT              Add a description to the database\n"
 "  --native-vfs         Use the native VFS for initially empty database files\n"
 "  --native-malloc      Turn off MEMSYS3/5 and Lookaside\n"
+"  --no-recover         Do not run recovery on dbsqlfuzz databases\n"
 "  --oss-fuzz           Enable OSS-FUZZ testing\n"
 "  --prng-seed N        Seed value for the PRGN inside of SQLite\n"
 "  -q|--quiet           Reduced output\n"
@@ -1721,6 +1906,9 @@ int main(int argc, char **argv){
       }else
       if( strcmp(z,"native-vfs")==0 ){
         nativeFlag = 1;
+      }else
+      if( strcmp(z,"no-recover")==0 ){
+        bNoRecover = 1;
       }else
       if( strcmp(z,"oss-fuzz")==0 ){
         ossFuzz = 1;
@@ -2269,6 +2457,9 @@ int main(int argc, char **argv){
 
   if( !quietFlag && !bScript ){
     sqlite3_int64 iElapse = timeOfDay() - iBegin;
+    if( g.nInvariant ){
+      printf("fuzzcheck: %u query invariants checked\n", g.nInvariant);
+    }
     printf("fuzzcheck: 0 errors out of %d tests in %d.%03d seconds\n"
            "SQLite %s %s\n",
            nTest, (int)(iElapse/1000), (int)(iElapse%1000),
