@@ -483,14 +483,10 @@ static const char * const sqlite3azCompileOpt[] = {
 #ifdef SQLITE_MUTEX_PTHREADS
   "MUTEX_PTHREADS",
 #endif
-<<<<<<< HEAD
-#if SQLITE_MUTEX_OS2
+#ifdef SQLITE_MUTEX_OS2
   "MUTEX_OS2",
 #endif
-#if SQLITE_MUTEX_W32
-=======
 #ifdef SQLITE_MUTEX_W32
->>>>>>> main
   "MUTEX_W32",
 #endif
 #ifdef SQLITE_NEED_ERR_NAME
