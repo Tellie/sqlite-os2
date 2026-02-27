@@ -389,7 +389,7 @@ int sqlite3InitOne(sqlite3 *db, int iDb, char **pzErrMsg, u32 mFlags){
     sqlite3ResetAllSchemasOfConnection(db);
     pDb = &db->aDb[iDb];
   }else
-  if( rc==SQLITE_OK || (db->flags&SQLITE_NoSchemaError)){
+  if( rc==SQLITE_OK || ((db->flags&SQLITE_NoSchemaError) && rc!=SQLITE_NOMEM)){
     /* Hack: If the SQLITE_NoSchemaError flag is set, then consider
     ** the schema loaded, even if errors (other than OOM) occurred. In
     ** this situation the current sqlite3_prepare() operation will fail,
@@ -574,15 +574,15 @@ void sqlite3ParseObjectReset(Parse *pParse){
   assert( db->pParse==pParse );
   assert( pParse->nested==0 );
 #ifndef SQLITE_OMIT_SHARED_CACHE
-  sqlite3DbFree(db, pParse->aTableLock);
+  if( pParse->aTableLock ) sqlite3DbNNFreeNN(db, pParse->aTableLock);
 #endif
   while( pParse->pCleanup ){
     ParseCleanup *pCleanup = pParse->pCleanup;
     pParse->pCleanup = pCleanup->pNext;
     pCleanup->xCleanup(db, pCleanup->pPtr);
-    sqlite3DbFreeNN(db, pCleanup);
+    sqlite3DbNNFreeNN(db, pCleanup);
   }
-  sqlite3DbFree(db, pParse->aLabel);
+  if( pParse->aLabel ) sqlite3DbNNFreeNN(db, pParse->aLabel);
   if( pParse->pConstExpr ){
     sqlite3ExprListDelete(db, pParse->pConstExpr);
   }
@@ -664,6 +664,14 @@ void sqlite3ParseObjectInit(Parse *pParse, sqlite3 *db){
 }
 
 /*
+** Maximum number of times that we will try again to prepare a statement
+** that returns SQLITE_ERROR_RETRY.
+*/
+#ifndef SQLITE_MAX_PREPARE_RETRY
+# define SQLITE_MAX_PREPARE_RETRY 25
+#endif
+
+/*
 ** Compile the UTF-8 encoded SQL statement zSql into a statement handle.
 */
 static int sqlite3Prepare(
@@ -697,7 +705,7 @@ static int sqlite3Prepare(
     sParse.disableLookaside++;
     DisableLookaside;
   }
-  sParse.disableVtab = (prepFlags & SQLITE_PREPARE_NO_VTAB)!=0;
+  sParse.prepFlags = prepFlags & 0xff;
 
   /* Check to verify that it is possible to get a read lock on all
   ** database schemas.  The inability to get a read lock indicates that
@@ -738,7 +746,9 @@ static int sqlite3Prepare(
     }
   }
 
-  sqlite3VtabUnlockList(db);
+#ifndef SQLITE_OMIT_VIRTUALTABLE
+  if( db->pDisconnect ) sqlite3VtabUnlockList(db);
+#endif
 
   if( nBytes>=0 && (nBytes==0 || zSql[nBytes-1]!=0) ){
     char *zSqlCopy;
@@ -837,7 +847,7 @@ static int sqlite3LockAndPrepare(
     rc = sqlite3Prepare(db, zSql, nBytes, prepFlags, pOld, ppStmt, pzTail);
     assert( rc==SQLITE_OK || *ppStmt==0 );
     if( rc==SQLITE_OK || db->mallocFailed ) break;
-  }while( rc==SQLITE_ERROR_RETRY
+  }while( (rc==SQLITE_ERROR_RETRY && (cnt++)<SQLITE_MAX_PREPARE_RETRY)
        || (rc==SQLITE_SCHEMA && (sqlite3ResetOneSchema(db,-1), cnt++)==0) );
   sqlite3BtreeLeaveAll(db);
   rc = sqlite3ApiExit(db, rc);

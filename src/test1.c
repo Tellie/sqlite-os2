@@ -1852,7 +1852,8 @@ static int SQLITE_TCLAPI test_create_function_v2(
     {"utf16le", SQLITE_UTF16LE },
     {"utf16be", SQLITE_UTF16BE },
     {"any",     SQLITE_ANY },
-    {"0", 0 }
+    {"0", 0 },
+    {0, 0 }
   };
 
   if( objc<5 || (objc%2)==0 ){
@@ -7273,6 +7274,7 @@ static int SQLITE_TCLAPI test_test_control(
     { "SQLITE_TESTCTRL_SORTER_MMAP",        SQLITE_TESTCTRL_SORTER_MMAP     }, 
     { "SQLITE_TESTCTRL_IMPOSTER",           SQLITE_TESTCTRL_IMPOSTER        },
     { "SQLITE_TESTCTRL_INTERNAL_FUNCTIONS", SQLITE_TESTCTRL_INTERNAL_FUNCTIONS},
+    { 0, 0 }
   };
   int iVerb;
   int iFlag;
@@ -7627,7 +7629,12 @@ static int SQLITE_TCLAPI win32_rmdir(
 **
 ** Enable or disable query optimizations using the sqlite3_test_control()
 ** interface.  Disable if BOOLEAN is false and enable if BOOLEAN is true.
-** OPT is the name of the optimization to be disabled.
+** OPT is the name of the optimization to be disabled.  OPT can also be a
+** list or optimizations names, in which case all optimizations named are
+** enabled or disabled.
+**
+** Each invocation of this control overrides all prior invocations.  The
+** changes are not cumulative.
 */
 static int SQLITE_TCLAPI optimization_control(
   void * clientData,
@@ -7640,6 +7647,7 @@ static int SQLITE_TCLAPI optimization_control(
   const char *zOpt;
   int onoff;
   int mask = 0;
+  int cnt = 0;
   static const struct {
     const char *zOptName;
     int mask;
@@ -7658,6 +7666,7 @@ static int SQLITE_TCLAPI optimization_control(
     { "skip-scan",           SQLITE_SkipScan       },
     { "push-down",           SQLITE_PushDown       },
     { "balanced-merge",      SQLITE_BalancedMerge  },
+    { "propagate-const",     SQLITE_PropagateConst },
   };
 
   if( objc!=4 ){
@@ -7668,13 +7677,13 @@ static int SQLITE_TCLAPI optimization_control(
   if( Tcl_GetBooleanFromObj(interp, objv[3], &onoff) ) return TCL_ERROR;
   zOpt = Tcl_GetString(objv[2]);
   for(i=0; i<sizeof(aOpt)/sizeof(aOpt[0]); i++){
-    if( strcmp(zOpt, aOpt[i].zOptName)==0 ){
-      mask = aOpt[i].mask;
-      break;
+    if( strstr(zOpt, aOpt[i].zOptName)!=0 ){
+      mask |= aOpt[i].mask;
+      cnt++;
     }
   }
   if( onoff ) mask = ~mask;
-  if( i>=sizeof(aOpt)/sizeof(aOpt[0]) ){
+  if( cnt==0 ){
     Tcl_AppendResult(interp, "unknown optimization - should be one of:",
                      (char*)0);
     for(i=0; i<sizeof(aOpt)/sizeof(aOpt[0]); i++){
@@ -7683,6 +7692,7 @@ static int SQLITE_TCLAPI optimization_control(
     return TCL_ERROR;
   }
   sqlite3_test_control(SQLITE_TESTCTRL_OPTIMIZATIONS, db, mask);
+  Tcl_SetObjResult(interp, Tcl_NewIntObj(mask));
   return TCL_OK;
 }
 
@@ -8908,9 +8918,9 @@ int Sqlitetest1_Init(Tcl_Interp *interp){
       (char*)&sqlite3_sync_count, TCL_LINK_INT);
   Tcl_LinkVar(interp, "sqlite_fullsync_count",
       (char*)&sqlite3_fullsync_count, TCL_LINK_INT);
-#if defined(SQLITE_ENABLE_SELECTTRACE)
-  Tcl_LinkVar(interp, "sqlite3_unsupported_selecttrace",
-      (char*)&sqlite3SelectTrace, TCL_LINK_INT);
+#if defined(SQLITE_ENABLE_TREETRACE)
+  Tcl_LinkVar(interp, "sqlite3_unsupported_treetrace",
+      (char*)&sqlite3TreeTrace, TCL_LINK_INT);
 #endif
 #if defined(SQLITE_ENABLE_FTS3) && defined(SQLITE_TEST)
   Tcl_LinkVar(interp, "sqlite_fts3_enable_parentheses",

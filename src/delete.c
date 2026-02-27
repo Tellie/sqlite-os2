@@ -61,18 +61,42 @@ void sqlite3CodeChangeCount(Vdbe *v, int regCounter, const char *zColName){
 **   1) It is a virtual table and no implementation of the xUpdate method
 **      has been provided
 **
-**   2) It is a system table (i.e. sqlite_schema), this call is not
+**   2) A trigger is currently being coded and the table is a virtual table
+**      that is SQLITE_VTAB_DIRECTONLY or if PRAGMA trusted_schema=OFF and
+**      the table is not SQLITE_VTAB_INNOCUOUS.
+**
+**   3) It is a system table (i.e. sqlite_schema), this call is not
 **      part of a nested parse and writable_schema pragma has not 
 **      been specified
 **
-**   3) The table is a shadow table, the database connection is in
+**   4) The table is a shadow table, the database connection is in
 **      defensive mode, and the current sqlite3_prepare()
 **      is for a top-level SQL statement.
 */
+static int vtabIsReadOnly(Parse *pParse, Table *pTab){
+  if( sqlite3GetVTable(pParse->db, pTab)->pMod->pModule->xUpdate==0 ){
+    return 1;
+  }
+
+  /* Within triggers:
+  **   *  Do not allow DELETE, INSERT, or UPDATE of SQLITE_VTAB_DIRECTONLY
+  **      virtual tables
+  **   *  Only allow DELETE, INSERT, or UPDATE of non-SQLITE_VTAB_INNOCUOUS
+  **      virtual tables if PRAGMA trusted_schema=ON.
+  */
+  if( pParse->pToplevel!=0
+   && pTab->u.vtab.p->eVtabRisk > 
+           ((pParse->db->flags & SQLITE_TrustedSchema)!=0)
+  ){
+    sqlite3ErrorMsg(pParse, "unsafe use of virtual table \"%s\"",
+      pTab->zName);
+  }
+  return 0;
+}
 static int tabIsReadOnly(Parse *pParse, Table *pTab){
   sqlite3 *db;
   if( IsVirtual(pTab) ){
-    return sqlite3GetVTable(pParse->db, pTab)->pMod->pModule->xUpdate==0;
+    return vtabIsReadOnly(pParse, pTab);
   }
   if( (pTab->tabFlags & (TF_Readonly|TF_Shadow))==0 ) return 0;
   db = pParse->db;
@@ -84,9 +108,11 @@ static int tabIsReadOnly(Parse *pParse, Table *pTab){
 }
 
 /*
-** Check to make sure the given table is writable.  If it is not
-** writable, generate an error message and return 1.  If it is
-** writable return 0;
+** Check to make sure the given table is writable. 
+**
+** If pTab is not writable  ->  generate an error message and return 1.
+** If pTab is writable but other errors have occurred -> return 1.
+** If pTab is writable and no prior errors -> return 0;
 */
 int sqlite3IsReadOnly(Parse *pParse, Table *pTab, int viewOk){
   if( tabIsReadOnly(pParse, pTab) ){
@@ -128,8 +154,8 @@ void sqlite3MaterializeView(
     assert( pFrom->nSrc==1 );
     pFrom->a[0].zName = sqlite3DbStrDup(db, pView->zName);
     pFrom->a[0].zDatabase = sqlite3DbStrDup(db, db->aDb[iDb].zDbSName);
-    assert( pFrom->a[0].pOn==0 );
-    assert( pFrom->a[0].pUsing==0 );
+    assert( pFrom->a[0].fg.isUsing==0 );
+    assert( pFrom->a[0].u3.pOn==0 );
   }
   pSel = sqlite3SelectNew(pParse, 0, pFrom, pWhere, 0, 0, pOrderBy, 
                           SF_IncludeHidden, pLimit);
@@ -300,7 +326,6 @@ void sqlite3DeleteFrom(
   assert( db->mallocFailed==0 );
   assert( pTabList->nSrc==1 );
 
-
   /* Locate the table which we want to delete.  This table has to be
   ** put in an SrcList structure because some of the subroutines we
   ** will be calling are designed to work with multiple tables and expect
@@ -323,6 +348,14 @@ void sqlite3DeleteFrom(
 #ifdef SQLITE_OMIT_VIEW
 # undef isView
 # define isView 0
+#endif
+
+#if TREETRACE_ENABLED
+  if( sqlite3TreeTrace & 0x10000 ){
+    sqlite3TreeViewLine(0, "In sqlite3Delete() at %s:%d", __FILE__, __LINE__);
+    sqlite3TreeViewDelete(pParse->pWith, pTabList, pWhere,
+                          pOrderBy, pLimit, pTrigger);
+  }
 #endif
 
 #ifdef SQLITE_ENABLE_UPDATE_DELETE_LIMIT
@@ -440,9 +473,10 @@ void sqlite3DeleteFrom(
     }
     for(pIdx=pTab->pIndex; pIdx; pIdx=pIdx->pNext){
       assert( pIdx->pSchema==pTab->pSchema );
-      sqlite3VdbeAddOp2(v, OP_Clear, pIdx->tnum, iDb);
       if( IsPrimaryKeyIndex(pIdx) && !HasRowid(pTab) ){
-        sqlite3VdbeChangeP3(v, -1, memCnt ? memCnt : -1);
+        sqlite3VdbeAddOp3(v, OP_Clear, pIdx->tnum, iDb, memCnt ? memCnt : -1);
+      }else{
+        sqlite3VdbeAddOp2(v, OP_Clear, pIdx->tnum, iDb);
       }
     }
   }else
@@ -642,7 +676,7 @@ delete_from_cleanup:
   sqlite3ExprListDelete(db, pOrderBy);
   sqlite3ExprDelete(db, pLimit);
 #endif
-  sqlite3DbFree(db, aToOpen);
+  if( aToOpen ) sqlite3DbNNFreeNN(db, aToOpen);
   return;
 }
 /* Make sure "isView" and other macros defined above are undefined. Otherwise

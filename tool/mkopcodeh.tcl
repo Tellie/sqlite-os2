@@ -158,9 +158,7 @@ set rp2v_ops {
   OP_JournalMode
   OP_VUpdate
   OP_VFilter
-  OP_Next
-  OP_SorterNext
-  OP_Prev
+  OP_Init
 }
 
 # Assign the smallest values to opcodes that are processed by resolveP2Values()

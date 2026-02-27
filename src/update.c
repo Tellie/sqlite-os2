@@ -59,11 +59,14 @@ static void updateVirtualTable(
 ** it has been converted into REAL.
 */
 void sqlite3ColumnDefault(Vdbe *v, Table *pTab, int i, int iReg){
+  Column *pCol;
   assert( pTab!=0 );
-  if( !IsView(pTab) ){
+  assert( pTab->nCol>i );
+  pCol = &pTab->aCol[i];
+  if( pCol->iDflt ){
     sqlite3_value *pValue = 0;
     u8 enc = ENC(sqlite3VdbeDb(v));
-    Column *pCol = &pTab->aCol[i];
+    assert( !IsView(pTab) );
     VdbeComment((v, "%s.%s", pTab->zName, pCol->zCnName));
     assert( i<pTab->nCol );
     sqlite3ValueFromExpr(sqlite3VdbeDb(v), 
@@ -74,7 +77,7 @@ void sqlite3ColumnDefault(Vdbe *v, Table *pTab, int i, int iReg){
     }
   }
 #ifndef SQLITE_OMIT_FLOATING_POINT
-  if( pTab->aCol[i].affinity==SQLITE_AFF_REAL && !IsVirtual(pTab) ){
+  if( pCol->affinity==SQLITE_AFF_REAL && !IsVirtual(pTab) ){
     sqlite3VdbeAddOp1(v, OP_RealAffinity, iReg);
   }
 #endif
@@ -374,6 +377,14 @@ void sqlite3Update(
 #ifdef SQLITE_OMIT_VIEW
 # undef isView
 # define isView 0
+#endif
+
+#if TREETRACE_ENABLED
+  if( sqlite3TreeTrace & 0x10000 ){
+    sqlite3TreeViewLine(0, "In sqlite3Update() at %s:%d", __FILE__, __LINE__);
+    sqlite3TreeViewUpdate(pParse->pWith, pTabList, pChanges, pWhere,
+                          onError, pOrderBy, pLimit, pUpsert, pTrigger);
+  }
 #endif
 
   /* If there was a FROM clause, set nChangeFrom to the number of expressions
@@ -1020,7 +1031,7 @@ void sqlite3Update(
       }else{
         sqlite3VdbeAddOp3(v, OP_NotExists, iDataCur, labelContinue,regOldRowid);
       }
-      VdbeCoverageNeverTaken(v);
+      VdbeCoverage(v);
     }
 
     /* Do FK constraint checks. */

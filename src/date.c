@@ -276,7 +276,7 @@ static void computeJD(DateTime *p){
   p->iJD = (sqlite3_int64)((X1 + X2 + D + B - 1524.5 ) * 86400000);
   p->validJD = 1;
   if( p->validHMS ){
-    p->iJD += p->h*3600000 + p->m*60000 + (sqlite3_int64)(p->s*1000);
+    p->iJD += p->h*3600000 + p->m*60000 + (sqlite3_int64)(p->s*1000 + 0.5);
     if( p->validTZ ){
       p->iJD -= p->tz*60000;
       p->validYMD = 0;
@@ -602,7 +602,7 @@ static int toLocaltime(
   p->D = sLocal.tm_mday;
   p->h = sLocal.tm_hour;
   p->m = sLocal.tm_min;
-  p->s = sLocal.tm_sec;
+  p->s = sLocal.tm_sec + (p->iJD%1000)*0.001;
   p->validYMD = 1;
   p->validHMS = 1;
   p->validJD = 0;
@@ -785,7 +785,7 @@ static int parseModifier(
       */
       if( sqlite3_strnicmp(z, "weekday ", 8)==0
                && sqlite3AtoF(&z[8], &r, sqlite3Strlen30(&z[8]), SQLITE_UTF8)>0
-               && (n=(int)r)==r && n>=0 && r<7 ){
+               && r>=0.0 && r<7.0 && (n=(int)r)==r ){
         sqlite3_int64 Z;
         computeYMD_HMS(p);
         p->validTZ = 0;

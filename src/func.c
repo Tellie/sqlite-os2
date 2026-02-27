@@ -740,7 +740,7 @@ static int patternCompare(
       ** c but in the other case and search the input string for either
       ** c or cx.
       */
-      if( c<=0x80 ){
+      if( c<0x80 ){
         char zStop[3];
         int bMatch;
         if( noCase ){
@@ -823,7 +823,13 @@ static int patternCompare(
 ** non-zero if there is no match.
 */
 int sqlite3_strglob(const char *zGlobPattern, const char *zString){
-  return patternCompare((u8*)zGlobPattern, (u8*)zString, &globInfo, '[');
+  if( zString==0 ){
+    return zGlobPattern!=0;
+  }else if( zGlobPattern==0 ){
+    return 1;
+  }else {
+    return patternCompare((u8*)zGlobPattern, (u8*)zString, &globInfo, '[');
+  }
 }
 
 /*
@@ -831,7 +837,13 @@ int sqlite3_strglob(const char *zGlobPattern, const char *zString){
 ** a miss - like strcmp().
 */
 int sqlite3_strlike(const char *zPattern, const char *zStr, unsigned int esc){
-  return patternCompare((u8*)zPattern, (u8*)zStr, &likeInfoNorm, esc);
+  if( zStr==0 ){
+    return zPattern!=0;
+  }else if( zPattern==0 ){
+    return 1;
+  }else{
+    return patternCompare((u8*)zPattern, (u8*)zStr, &likeInfoNorm, esc);
+  }
 }
 
 /*
@@ -2098,11 +2110,11 @@ static void logFunc(
     switch( SQLITE_PTR_TO_INT(sqlite3_user_data(context)) ){
       case 1:
         /* Convert from natural logarithm to log base 10 */
-        ans *= 1.0/M_LN10;
+        ans /= M_LN10;
         break;
       case 2:
         /* Convert from natural logarithm to log base 2 */
-        ans *= 1.0/M_LN2;
+        ans /= M_LN2;
         break;
       default:
         break;
@@ -2241,8 +2253,7 @@ void sqlite3RegisterBuiltinFunctions(void){
     INLINE_FUNC(likelihood,      2, INLINEFUNC_unlikely, SQLITE_FUNC_UNLIKELY),
     INLINE_FUNC(likely,          1, INLINEFUNC_unlikely, SQLITE_FUNC_UNLIKELY),
 #ifdef SQLITE_ENABLE_OFFSET_SQL_FUNC
-    FUNCTION2(sqlite_offset,     1, 0, 0, noopFunc,  SQLITE_FUNC_OFFSET|
-                                                     SQLITE_FUNC_TYPEOF),
+    INLINE_FUNC(sqlite_offset,   1, INLINEFUNC_sqlite_offset, 0 ),
 #endif
     FUNCTION(ltrim,              1, 1, 0, trimFunc         ),
     FUNCTION(ltrim,              2, 1, 0, trimFunc         ),
