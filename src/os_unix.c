@@ -6391,6 +6391,7 @@ static int mkFullPathname(
 ){
   int nPath = sqlite3Strlen30(zPath);
   int iOff = 0;
+  int i, j;
 #ifdef SQLITE_OS_OS2
   if( !IS_ABSOLUTE_PATH(zPath) ){
 #else
