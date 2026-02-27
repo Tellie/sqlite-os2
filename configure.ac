@@ -155,6 +155,7 @@ AC_SUBST(VERSION)
 RELEASE=`cat $srcdir/VERSION`
 AC_MSG_NOTICE(Release set to $RELEASE)
 AC_SUBST(RELEASE)
+
 VERSION_NUMBER=[`cat $srcdir/VERSION \
                            | sed 's/[^0-9]/ /g' \
                 | awk '{printf "%d%03d%03d",$1,$2,$3}'`]
@@ -669,7 +670,7 @@ fi
 # statements.
 AC_ARG_ENABLE(update-limit, AC_HELP_STRING([--enable-update-limit],
       [Enable the UPDATE/DELETE LIMIT clause]))
-if test "${enable_udlimit}" = "yes" ; then
+if test "${enable_update_limit}" = "yes" ; then
   OPT_FEATURE_FLAGS="${OPT_FEATURE_FLAGS} -DSQLITE_ENABLE_UPDATE_DELETE_LIMIT"
 fi
 
