@@ -1096,7 +1096,7 @@ SHELL_SRC = \
         $(TOP)/src/test_windirent.c
 
 shell.c:	$(SHELL_SRC) $(TOP)/tool/mkshellc.tcl
-	$(TCLSH_CMD) $(TOP)/tool/mkshellc.tcl >shell.c
+	$(TCLSH_CMD) $(TOP)/tool/mkshellc.tcl | tr -d '\r' >shell.c
 
 
 
@@ -1302,7 +1302,7 @@ sqlite3_analyzer$(TEXE): sqlite3_analyzer.c
 	$(LTLINK) sqlite3_analyzer.c -o $@ $(LIBTCL) $(TLIBS)
 
 sqltclsh.c: sqlite3.c $(TOP)/src/tclsqlite.c $(TOP)/tool/sqltclsh.tcl $(TOP)/ext/misc/appendvfs.c $(TOP)/tool/mkccode.tcl $(TOP)/tool/sqltclsh.c.in
-	$(TCLSH_CMD) $(TOP)/tool/mkccode.tcl $(TOP)/tool/sqltclsh.c.in >sqltclsh.c
+	$(TCLSH_CMD) $(TOP)/tool/mkccode.tcl $(TOP)/tool/sqltclsh.c.in | tr -d '\r' >sqltclsh.c
 
 sqltclsh$(TEXE): sqltclsh.c
 	$(LTLINK) sqltclsh.c -o $@ $(LIBTCL) $(TLIBS)
